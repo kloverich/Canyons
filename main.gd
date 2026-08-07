@@ -1,6 +1,8 @@
 extends Node2D
 
 # Stick Rig Aquarium — every creature is built from animated line segments.
+const SKIN_TEXTURE: Texture2D = preload("res://assets/alien_chitin_skin_atlas.png")
+const SKIN_UV_SCALE := 0.12 # Sample only 12% of the atlas per mesh: large, readable plates.
 var t := 0.0
 var selected := 0
 var creatures := [
@@ -79,9 +81,7 @@ func stick(a: Vector2, b: Vector2, color: Color, w := 3.0) -> void:
 	var normal := Vector2(-tangent.y, tangent.x)
 	var radius := maxf(3.4, w * 1.15)
 	draw_spline_skin(a, b, normal, radius, color)
-	# Keep the rig visible through the transparent skin.
-	draw_line(a, b, color.lightened(0.45), maxf(1.2, w * 0.68), true)
-	draw_circle(a, maxf(1.8, w * 0.45), color.lightened(0.65))
+	# The stick is now a hidden deformation bone: only its textured surface is rendered.
 
 func draw_spline_skin(a: Vector2, b: Vector2, normal: Vector2, radius: float, color: Color) -> void:
 	# Two smooth, bowed polylines approximate the opposing sides of a spline tube.
@@ -99,10 +99,13 @@ func draw_spline_skin(a: Vector2, b: Vector2, normal: Vector2, radius: float, co
 	var skin := PackedVector2Array()
 	for point in edge_a: skin.append(point)
 	for i in range(edge_b.size() - 1, -1, -1): skin.append(edge_b[i])
-	draw_colored_polygon(skin, Color(color.r, color.g, color.b, 0.42))
-	# A subtle shiny spline edge describes the outside of the skin, not a mesh grid.
-	draw_polyline(edge_a, color.lightened(0.24), 1.15, true)
-	draw_polyline(edge_b, color.darkened(0.12), 1.0, true)
+	var skin_uv := PackedVector2Array()
+	for i in range(edge_a.size()):
+		skin_uv.append(Vector2(0.44 + float(i) / samples * SKIN_UV_SCALE, 0.46))
+	for i in range(edge_b.size() - 1, -1, -1):
+		skin_uv.append(Vector2(0.44 + float(i) / samples * SKIN_UV_SCALE, 0.46 + SKIN_UV_SCALE))
+	# UVs run lengthwise along the moving spline sleeve, making this a deforming skin.
+	draw_polygon(skin, PackedColorArray([Color.WHITE]), skin_uv, SKIN_TEXTURE)
 
 func chain(base: Vector2, angle: float, count: int, length: float, color: Color, phase: float, wave := 0.4) -> Vector2:
 	var p := base
@@ -114,7 +117,21 @@ func chain(base: Vector2, angle: float, count: int, length: float, color: Color,
 	return p
 
 func oval_sticks(center: Vector2, rx: float, ry: float, color: Color, segments := 12, rotation := 0.0) -> void:
-	var prev := center + Vector2(rx, 0).rotated(rotation)
+	# A closed silhouette is one continuous skin mesh, rather than individual bone sleeves.
+	var outline := PackedVector2Array()
+	for n in range(segments):
+		var a := TAU * n / segments
+		outline.append(center + Vector2(cos(a) * rx, sin(a) * ry).rotated(rotation))
+	var skin_uv := PackedVector2Array()
+	for point in outline:
+		var local := (point - center).rotated(-rotation)
+		skin_uv.append(Vector2(
+			0.44 + local.x / (rx * 2.0) * SKIN_UV_SCALE,
+			0.44 + local.y / (ry * 2.0) * SKIN_UV_SCALE
+		))
+	# One continuous UV-mapped skin surface; the wires are drawn above it below.
+	draw_polygon(outline, PackedColorArray([Color.WHITE]), skin_uv, SKIN_TEXTURE)
+	var prev := outline[0]
 	for n in range(1, segments + 1):
 		var a := TAU * n / segments
 		var p := center + Vector2(cos(a) * rx, sin(a) * ry).rotated(rotation)
