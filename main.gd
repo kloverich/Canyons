@@ -18,7 +18,6 @@ const SKIN_TEXTURES: Array[Texture2D] = [
 	preload("res://assets/skins/lobster.png"),
 ]
 const SKIN_UV_PER_PIXEL := 0.0009 # One shared, large-scale projection across an entire creature.
-const LIMB_UV_SCALE := 0.07 # Fixed bone-local UV range: texture travels with each animated sleeve.
 var active_skin: Texture2D = SKIN_TEXTURES[0]
 var active_skin_origin := Vector2.ZERO
 var t := 0.0
@@ -120,21 +119,63 @@ func draw_spline_skin(a: Vector2, b: Vector2, normal: Vector2, radius: float, co
 	for point in edge_a: skin.append(point)
 	for i in range(edge_b.size() - 1, -1, -1): skin.append(edge_b[i])
 	var skin_uv := PackedVector2Array()
+	var uv_center := Vector2(0.5, 0.5) + (a - active_skin_origin) * SKIN_UV_PER_PIXEL
 	for i in range(edge_a.size()):
-		skin_uv.append(Vector2(0.44 + float(i) / samples * LIMB_UV_SCALE, 0.46))
+		skin_uv.append(uv_center + Vector2(float(i) / samples * a.distance_to(b) * SKIN_UV_PER_PIXEL, -radius * SKIN_UV_PER_PIXEL))
 	for i in range(edge_b.size() - 1, -1, -1):
-		skin_uv.append(Vector2(0.44 + float(i) / samples * LIMB_UV_SCALE, 0.46 + LIMB_UV_SCALE))
-	# These UVs are fixed in the spline mesh's local length/width coordinates. Unlike
-	# world projection, the pixels therefore travel and rotate with the moving bone.
+		skin_uv.append(uv_center + Vector2(float(i) / samples * a.distance_to(b) * SKIN_UV_PER_PIXEL, radius * SKIN_UV_PER_PIXEL))
+	# UV distance matches screen-space distance, so the texture keeps the same density
+	# while its coordinates remain attached to the animated vertices.
 	draw_polygon(skin, PackedColorArray([Color.WHITE]), skin_uv, active_skin)
+
+func draw_chain_skin(points: PackedVector2Array, base_radius: float) -> void:
+	# A whole articulated appendage is one ribbon mesh. This removes the repeated
+	# texture patches and overlapping seams previously visible at every joint.
+	if points.size() < 2:
+		return
+	var upper := PackedVector2Array()
+	var lower := PackedVector2Array()
+	var upper_uv := PackedVector2Array()
+	var lower_uv := PackedVector2Array()
+	var travelled := 0.0
+	var uv_root := Vector2(0.5, 0.5) + (points[0] - active_skin_origin) * SKIN_UV_PER_PIXEL
+	for i in range(points.size()):
+		if i > 0:
+			travelled += points[i - 1].distance_to(points[i])
+		var tangent: Vector2
+		if i == 0:
+			tangent = points[1] - points[0]
+		elif i == points.size() - 1:
+			tangent = points[i] - points[i - 1]
+		else:
+			tangent = points[i + 1] - points[i - 1]
+		tangent = tangent.normalized()
+		var normal := Vector2(-tangent.y, tangent.x)
+		var taper := lerpf(1.0, 0.68, float(i) / (points.size() - 1))
+		var radius := maxf(2.2, base_radius * taper)
+		upper.append(points[i] + normal * radius)
+		lower.append(points[i] - normal * radius)
+		upper_uv.append(uv_root + Vector2(travelled * SKIN_UV_PER_PIXEL, -radius * SKIN_UV_PER_PIXEL))
+		lower_uv.append(uv_root + Vector2(travelled * SKIN_UV_PER_PIXEL, radius * SKIN_UV_PER_PIXEL))
+	var mesh := PackedVector2Array()
+	var mesh_uv := PackedVector2Array()
+	for i in range(upper.size()):
+		mesh.append(upper[i])
+		mesh_uv.append(upper_uv[i])
+	for i in range(lower.size() - 1, -1, -1):
+		mesh.append(lower[i])
+		mesh_uv.append(lower_uv[i])
+	draw_polygon(mesh, PackedColorArray([Color.WHITE]), mesh_uv, active_skin)
 
 func chain(base: Vector2, angle: float, count: int, length: float, color: Color, phase: float, wave := 0.4) -> Vector2:
 	var p := base
+	var points := PackedVector2Array([base])
 	for n in count:
 		var a := angle + sin(t * 2.1 + phase + n * 0.7) * wave
 		var q := p + Vector2.from_angle(a) * length
-		stick(p, q, color, max(1.0, 3.3 - n * 0.22))
+		points.append(q)
 		p = q
+	draw_chain_skin(points, 4.1)
 	return p
 
 func oval_sticks(center: Vector2, rx: float, ry: float, color: Color, segments := 12, rotation := 0.0) -> void:
@@ -146,14 +187,8 @@ func oval_sticks(center: Vector2, rx: float, ry: float, color: Color, segments :
 	var skin_uv := PackedVector2Array()
 	for point in outline:
 		skin_uv.append(Vector2(0.5, 0.5) + (point - active_skin_origin) * SKIN_UV_PER_PIXEL)
-	# One continuous UV-mapped skin surface; the wires are drawn above it below.
+	# One continuous UV-mapped skin surface with no second textured perimeter pass.
 	draw_polygon(outline, PackedColorArray([Color.WHITE]), skin_uv, active_skin)
-	var prev := outline[0]
-	for n in range(1, segments + 1):
-		var a := TAU * n / segments
-		var p := center + Vector2(cos(a) * rx, sin(a) * ry).rotated(rotation)
-		stick(prev, p, color, 3)
-		prev = p
 
 func draw_rig(p: Vector2, id: int, color: Color, phase: float) -> void:
 	var k := t + phase
@@ -175,10 +210,11 @@ func draw_rig(p: Vector2, id: int, color: Color, phase: float) -> void:
 			chain(p+Vector2(-12,0), 2.7, 2, 15, color, k, 0.2); chain(p+Vector2(12,0), .4, 2, 15, color, k+1, 0.2)
 			chain(p+Vector2(-7,22), 1.95, 2, 15, color, k+2, 0.15); chain(p+Vector2(7,22), 1.2, 2, 15, color, k+3, 0.15)
 		4: # leech
-			var last := p + Vector2(-37,0)
+			var leech_points := PackedVector2Array()
 			for n in 7:
 				var q := p + Vector2(-37+n*12, sin(k*3+n*.9)*8)
-				stick(last,q,color,6); last=q
+				leech_points.append(q)
+			draw_chain_skin(leech_points, 7.2)
 		5: # urchin
 			oval_sticks(p, 15,15,color,10)
 			for n in 22: chain(p, TAU*n/22.0, 2, 13, color, k+n*.2, 0.16)
@@ -193,10 +229,12 @@ func draw_rig(p: Vector2, id: int, color: Color, phase: float) -> void:
 			for n in 5: chain(p+Vector2(-10+n*9,5),PI/2+.35,2,13,color,k+n,.35)
 			chain(p+Vector2(20,-4),-.7,3,12,color,k,0.3)
 		9: # nautilus
-			var last:=p+Vector2(28,0)
-			for n in 1: pass
+			var shell_points := PackedVector2Array([p + Vector2(28,0)])
 			for n in range(1,25):
-				var a:=n*.52; var q:=p+Vector2(cos(a),sin(a))*(30-n*.95); stick(last,q,color,3); last=q
+				var a:=n*.52
+				var q:=p+Vector2(cos(a),sin(a))*(30-n*.95)
+				shell_points.append(q)
+			draw_chain_skin(shell_points, 4.2)
 		10: # horseshoe
 			oval_sticks(p,30,17,color,10)
 			chain(p+Vector2(28,0),0,3,15,color,k,.1)
