@@ -1,8 +1,26 @@
 extends Node2D
 
 # Stick Rig Aquarium — every creature is built from animated line segments.
-const SKIN_TEXTURE: Texture2D = preload("res://assets/alien_chitin_skin_atlas.png")
-const SKIN_UV_SCALE := 0.12 # Sample only 12% of the atlas per mesh: large, readable plates.
+const SKIN_TEXTURES: Array[Texture2D] = [
+	preload("res://assets/skins/anemone.png"),
+	preload("res://assets/skins/crab.png"),
+	preload("res://assets/skins/squid.png"),
+	preload("res://assets/skins/astronaut.png"),
+	preload("res://assets/skins/leech.png"),
+	preload("res://assets/skins/urchin.png"),
+	preload("res://assets/skins/octopus.png"),
+	preload("res://assets/skins/jellyfish.png"),
+	preload("res://assets/skins/mantis_shrimp.png"),
+	preload("res://assets/skins/nautilus.png"),
+	preload("res://assets/skins/horseshoe_crab.png"),
+	preload("res://assets/skins/cuttlefish.png"),
+	preload("res://assets/skins/starfish.png"),
+	preload("res://assets/skins/lobster.png"),
+]
+const SKIN_UV_PER_PIXEL := 0.0009 # One shared, large-scale projection across an entire creature.
+const LIMB_UV_SCALE := 0.07 # Fixed bone-local UV range: texture travels with each animated sleeve.
+var active_skin: Texture2D = SKIN_TEXTURES[0]
+var active_skin_origin := Vector2.ZERO
 var t := 0.0
 var selected := 0
 var creatures := [
@@ -68,6 +86,8 @@ func draw_card(r: Rect2, index: int) -> void:
 	draw_string(ThemeDB.fallback_font, r.position + Vector2(9, 18), c[0], HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("#ecf7ff"))
 	draw_string(ThemeDB.fallback_font, r.position + Vector2(9, 112), c[1], HORIZONTAL_ALIGNMENT_LEFT, -1, 11, Color("#7c9aad"))
 	var center := r.position + Vector2(86, 62)
+	active_skin = SKIN_TEXTURES[index]
+	active_skin_origin = center
 	draw_rig(center, index, c[2], float(index) * 0.47)
 
 # The bright line is the original wire skeleton. A soft, spline-edged sleeve is
@@ -101,11 +121,12 @@ func draw_spline_skin(a: Vector2, b: Vector2, normal: Vector2, radius: float, co
 	for i in range(edge_b.size() - 1, -1, -1): skin.append(edge_b[i])
 	var skin_uv := PackedVector2Array()
 	for i in range(edge_a.size()):
-		skin_uv.append(Vector2(0.44 + float(i) / samples * SKIN_UV_SCALE, 0.46))
+		skin_uv.append(Vector2(0.44 + float(i) / samples * LIMB_UV_SCALE, 0.46))
 	for i in range(edge_b.size() - 1, -1, -1):
-		skin_uv.append(Vector2(0.44 + float(i) / samples * SKIN_UV_SCALE, 0.46 + SKIN_UV_SCALE))
-	# UVs run lengthwise along the moving spline sleeve, making this a deforming skin.
-	draw_polygon(skin, PackedColorArray([Color.WHITE]), skin_uv, SKIN_TEXTURE)
+		skin_uv.append(Vector2(0.44 + float(i) / samples * LIMB_UV_SCALE, 0.46 + LIMB_UV_SCALE))
+	# These UVs are fixed in the spline mesh's local length/width coordinates. Unlike
+	# world projection, the pixels therefore travel and rotate with the moving bone.
+	draw_polygon(skin, PackedColorArray([Color.WHITE]), skin_uv, active_skin)
 
 func chain(base: Vector2, angle: float, count: int, length: float, color: Color, phase: float, wave := 0.4) -> Vector2:
 	var p := base
@@ -124,13 +145,9 @@ func oval_sticks(center: Vector2, rx: float, ry: float, color: Color, segments :
 		outline.append(center + Vector2(cos(a) * rx, sin(a) * ry).rotated(rotation))
 	var skin_uv := PackedVector2Array()
 	for point in outline:
-		var local := (point - center).rotated(-rotation)
-		skin_uv.append(Vector2(
-			0.44 + local.x / (rx * 2.0) * SKIN_UV_SCALE,
-			0.44 + local.y / (ry * 2.0) * SKIN_UV_SCALE
-		))
+		skin_uv.append(Vector2(0.5, 0.5) + (point - active_skin_origin) * SKIN_UV_PER_PIXEL)
 	# One continuous UV-mapped skin surface; the wires are drawn above it below.
-	draw_polygon(outline, PackedColorArray([Color.WHITE]), skin_uv, SKIN_TEXTURE)
+	draw_polygon(outline, PackedColorArray([Color.WHITE]), skin_uv, active_skin)
 	var prev := outline[0]
 	for n in range(1, segments + 1):
 		var a := TAU * n / segments
