@@ -34,6 +34,7 @@ const SPECIMENS := [
 	["CUTTLEFISH", "broad finned mantle", Color("#c39c85")],
 	["STARFISH", "five tapered gripping arms", Color("#bd5944")],
 	["LOBSTER", "segmented tail, claws and antennae", Color("#b74b45")],
+	["ALIEN WORM", "procedural peristaltic skin animation", Color("#73b8a2")],
 ]
 
 var specimens: Array[Node3D] = []
@@ -74,6 +75,9 @@ func _process(delta: float) -> void:
 	selection_ring.rotation.y = elapsed * 0.45
 
 func _unhandled_input(event: InputEvent) -> void:
+	if event is InputEventKey and event.pressed and event.keycode == KEY_ESCAPE:
+		get_tree().change_scene_to_file("res://test_launcher.tscn")
+		return
 	if event is InputEventKey and event.pressed and not event.echo:
 		if event.keycode in [KEY_RIGHT, KEY_D, KEY_SPACE]:
 			select_specimen((selected + 1) % SPECIMENS.size())
@@ -152,7 +156,7 @@ func build_gallery() -> void:
 		root.position = Vector3((col - 2) * 4.0, 0.72, row * 4.0)
 		add_child(root)
 		specimens.append(root)
-		var material := creature_material(i)
+		var material: Material = creature_material(i) if i < SKIN_TEXTURES.size() else accent_material(SPECIMENS[i][2].lightened(0.18))
 		match i:
 			0: build_anemone(root, material)
 			1: build_crab(root, material)
@@ -168,7 +172,18 @@ func build_gallery() -> void:
 			11: build_cuttlefish(root, material)
 			12: build_starfish(root, material)
 			13: build_lobster(root, material)
+			14: build_worm(root)
 		add_pedestal(root, i)
+
+func build_worm(root: Node3D) -> void:
+	# alien_worm.gd instantiates the supplied GLB and drives its procedural
+	# peristaltic animation. Keeping it on a child actor lets the gallery's
+	# selection rotation continue to work independently.
+	var actor := Node3D.new()
+	actor.name = "AnimatedAlienWorm"
+	actor.set_script(preload("res://alien_worm.gd"))
+	actor.position.y = 0.18
+	root.add_child(actor)
 
 func creature_material(index: int) -> StandardMaterial3D:
 	var material := StandardMaterial3D.new()
@@ -178,8 +193,14 @@ func creature_material(index: int) -> StandardMaterial3D:
 	material.uv1_world_triplanar = false
 	material.uv1_scale = Vector3(2.2, 2.2, 2.2)
 	material.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS_ANISOTROPIC
-	material.roughness = 0.48
-	material.metallic = 0.22
+	# The texture is deliberately shared by the large forms and their limbs.  A
+	# soft highlight and a little subsurface scatter make the mesh read as taut
+	# skin stretched over an internal structure instead of separate plastic parts.
+	material.roughness = 0.32
+	material.metallic = 0.04
+	material.subsurf_scatter_enabled = true
+	material.subsurf_scatter_strength = 0.22
+	material.subsurf_scatter_skin_mode = true
 	return material
 
 func accent_material(color: Color, emission := false) -> StandardMaterial3D:
@@ -253,15 +274,65 @@ func add_cone(parent: Node3D, a: Vector3, b: Vector3, radius: float, material: M
 func add_chain(parent: Node3D, points: PackedVector3Array, radius: float, material: Material, phase := 0.0) -> Node3D:
 	var chain_root := Node3D.new()
 	parent.add_child(chain_root)
-	for i in range(points.size() - 1):
-		add_cylinder(chain_root, points[i], points[i + 1], radius * (1.0 - i * 0.12), material)
-		add_sphere(chain_root, points[i], Vector3.ONE * radius * 1.9, material, 10)
-	add_sphere(chain_root, points[-1], Vector3.ONE * radius * 1.25, material, 10)
+	add_taut_skin_tube(chain_root, points, radius, material)
 	chain_root.set_meta("rest_rotation", chain_root.rotation)
 	chain_root.set_meta("wiggle_axis", Vector3(0.12, 0.05, 0.18))
 	chain_root.set_meta("wiggle_phase", phase)
 	wiggle_parts.append(chain_root)
 	return chain_root
+
+# Creates one closed, smoothly shaded surface for a whole limb.  This replaces
+# the former stack of cylinders and joint spheres: besides being lighter, the
+# silhouette has no visible construction seams when a tentacle bends.
+func add_taut_skin_tube(parent: Node3D, points: PackedVector3Array, radius: float, material: Material) -> MeshInstance3D:
+	var surface := SurfaceTool.new()
+	surface.begin(Mesh.PRIMITIVE_TRIANGLES)
+	var sides := 12
+	var rings: Array[Array] = []
+	for i in points.size():
+		var tangent: Vector3
+		if i == 0:
+			tangent = (points[1] - points[0]).normalized()
+		elif i == points.size() - 1:
+			tangent = (points[i] - points[i - 1]).normalized()
+		else:
+			tangent = (points[i + 1] - points[i - 1]).normalized()
+		var reference := Vector3.UP if abs(tangent.dot(Vector3.UP)) < 0.92 else Vector3.FORWARD
+		var side := tangent.cross(reference).normalized()
+		var up := side.cross(tangent).normalized()
+		var taper := lerpf(1.12, 0.42, float(i) / float(points.size() - 1))
+		var ring: Array = []
+		for j in sides:
+			var angle := TAU * float(j) / float(sides)
+			var normal := (side * cos(angle) + up * sin(angle)).normalized()
+			ring.append(points[i] + normal * radius * taper)
+		rings.append(ring)
+
+	for i in range(rings.size() - 1):
+		for j in sides:
+			var next := (j + 1) % sides
+			add_skin_triangle(surface, rings[i][j], rings[i + 1][j], rings[i + 1][next])
+			add_skin_triangle(surface, rings[i][j], rings[i + 1][next], rings[i][next])
+	var first_center := points[0]
+	var last_center := points[-1]
+	for j in sides:
+		var next := (j + 1) % sides
+		add_skin_triangle(surface, first_center, rings[0][next], rings[0][j])
+		add_skin_triangle(surface, last_center, rings[-1][j], rings[-1][next])
+	var node := MeshInstance3D.new()
+	node.mesh = surface.commit()
+	node.material_override = material
+	parent.add_child(node)
+	return node
+
+func add_skin_triangle(surface: SurfaceTool, a: Vector3, b: Vector3, c: Vector3) -> void:
+	var normal := (b - a).cross(c - a).normalized()
+	surface.set_normal(normal)
+	surface.add_vertex(a)
+	surface.set_normal(normal)
+	surface.add_vertex(b)
+	surface.set_normal(normal)
+	surface.add_vertex(c)
 
 func add_eye(parent: Node3D, position: Vector3, scale := 0.12) -> void:
 	add_sphere(parent, position, Vector3.ONE * scale, accent_material(Color("#071015"), false), 12)

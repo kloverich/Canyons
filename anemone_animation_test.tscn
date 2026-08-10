@@ -1,0 +1,6 @@
+[gd_scene load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://anemone_animation_test.gd" id="1_anemone"]
+
+[node name="AnemoneAnimationTest" type="Node3D"]
+script = ExtResource("1_anemone")
