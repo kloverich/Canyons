@@ -46,7 +46,7 @@ func _process(_delta: float) -> void:
 		worm.rotation.z = sin(Time.get_ticks_msec() * 0.0017) * 0.07
 	if feed_target:
 		if eating:
-			feed_target.begin(Vector3(2.0, 0.0, 0.0), Vector3(0.18, 0.0, 0.0), Vector3.LEFT) if not feed_target.active else feed_target.tick(_delta)
+			feed_target.begin(Vector3(2.0, 0.0, 0.0), Vector3(0.85, 0.10, 0.0), Vector3(0.18, 0.0, 0.0), Vector3.LEFT) if not feed_target.active else feed_target.tick(_delta)
 		else:
 			feed_target.stop()
 

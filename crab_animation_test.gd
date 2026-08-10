@@ -15,6 +15,9 @@ var orbit_yaw := 0.0
 var orbit_pitch := 0.12
 var orbiting := false
 var mode_label: Label
+var pincer: Node3D
+var upper_jaw: Node3D
+var lower_jaw: Node3D
 
 func _ready() -> void:
 	_build_world()
@@ -31,7 +34,45 @@ func _ready() -> void:
 	if skeleton:
 		for bone_index in skeleton.get_bone_count():
 			rest_rotations[bone_index] = skeleton.get_bone_pose_rotation(bone_index)
+	_build_feeding_parts()
 	_build_ui()
+
+func _build_feeding_parts() -> void:
+	# Explicit foreground pincer and jaws make the capture and bite legible even
+	# when the source crab rig's anonymous bone names cannot identify its claws.
+	pincer = Node3D.new()
+	pincer.name = "AnimatedFeedingPincer"
+	add_child(pincer)
+	var claw_material := StandardMaterial3D.new()
+	claw_material.albedo_color = Color("#5d7d86")
+	claw_material.metallic = 0.35
+	claw_material.roughness = 0.42
+	for side in [-1.0, 1.0]:
+		var finger := MeshInstance3D.new()
+		var finger_mesh := CapsuleMesh.new()
+		finger_mesh.radius = 0.16
+		finger_mesh.height = 1.15
+		finger_mesh.radial_segments = 10
+		finger.mesh = finger_mesh
+		finger.material_override = claw_material
+		finger.position = Vector3(0.0, side * 0.24, 0.0)
+		finger.rotation.z = side * 0.52
+		pincer.add_child(finger)
+	upper_jaw = _make_jaw(claw_material, -1.0)
+	lower_jaw = _make_jaw(claw_material, 1.0)
+
+func _make_jaw(material: Material, side: float) -> Node3D:
+	var jaw := Node3D.new()
+	jaw.position = Vector3(0.15, -0.05, 0.18)
+	var mesh_node := MeshInstance3D.new()
+	var mesh := BoxMesh.new()
+	mesh.size = Vector3(0.72, 0.12, 0.34)
+	mesh_node.mesh = mesh
+	mesh_node.material_override = material
+	mesh_node.position = Vector3(0.16, side * 0.12, 0.0)
+	jaw.add_child(mesh_node)
+	add_child(jaw)
+	return jaw
 
 func _find_skeleton(node: Node) -> void:
 	if node is Skeleton3D and not skeleton:
@@ -45,18 +86,23 @@ func _process(delta: float) -> void:
 		_animate_crab()
 	if feed_target:
 		if animation_mode == "EAT":
-			feed_target.begin(Vector3(3.2, 0.2, 0.2), Vector3(0.15, -0.05, 0.18), Vector3.LEFT) if not feed_target.active else feed_target.tick(delta)
+			feed_target.begin(Vector3(3.2, 0.2, 0.2), Vector3(1.18, 0.42, 0.18), Vector3(0.15, -0.05, 0.18), Vector3.LEFT, "crab") if not feed_target.active else feed_target.tick(delta)
 		else:
 			feed_target.stop()
 	_update_camera(delta)
 
 func _animate_crab() -> void:
 	var mode_phase := elapsed * (5.6 if animation_mode == "SCUTTLE" else 2.0)
+	var bite_time: float = feed_target.get_feed_time() if animation_mode == "EAT" and feed_target else -1.0
+	_animate_feeding_parts(bite_time)
 	for bone_index in skeleton.get_bone_count():
 		var bone_name := skeleton.get_bone_name(bone_index)
 		var rest: Quaternion = rest_rotations[bone_index]
 		if bone_name == "bone_0":
 			var body_pitch := sin(elapsed * 2.0) * (0.035 if animation_mode == "IDLE" else 0.07)
+			if bite_time >= 4.25 and bite_time < 5.12:
+				# Lean/open for the presented prey, then snap shut as it enters.
+				body_pitch += 0.20 * sin(clampf((bite_time - 4.25) / 0.87, 0.0, 1.0) * PI)
 			var body_yaw := sin(elapsed * 1.2) * (0.04 if animation_mode != "THREAT" else 0.14)
 			skeleton.set_bone_pose_rotation(bone_index, rest * Quaternion(Vector3.RIGHT, body_pitch) * Quaternion(Vector3.UP, body_yaw))
 			continue
@@ -69,6 +115,9 @@ func _animate_crab() -> void:
 			"EAT":
 				swing = sin(elapsed * 5.0 + phase_offset) * 0.16
 				lift = 0.08 + maxf(0.0, sin(elapsed * 5.0 + phase_offset)) * 0.11
+				if bite_time >= 1.65 and bite_time < 2.55 and number >= 56:
+					# The forward pincer pair thrusts toward the fleeing target.
+					swing += side * 0.62 * smoothstep(1.65, 2.55, bite_time)
 			"IDLE":
 				swing = sin(elapsed * 1.7 + phase_offset) * 0.045
 				lift = cos(elapsed * 1.5 + phase_offset) * 0.025
@@ -83,6 +132,41 @@ func _animate_crab() -> void:
 				lift = cos(elapsed * 3.5 + phase_offset) * 0.10
 		var axis := Vector3.FORWARD if number % 3 else Vector3.RIGHT
 		skeleton.set_bone_pose_rotation(bone_index, rest * Quaternion(axis, swing) * Quaternion(Vector3.RIGHT, lift * side))
+
+func _animate_feeding_parts(feed_time: float) -> void:
+	if not pincer or not upper_jaw or not lower_jaw:
+		return
+	var eating := feed_time >= 0.0
+	pincer.visible = eating
+	upper_jaw.visible = eating
+	lower_jaw.visible = eating
+	if not eating:
+		return
+	# Extend from the crab to the fleeing target, clamp around it, then retract
+	# carrying the catch to the jaws.
+	var start := Vector3(0.45, 0.28, 0.18)
+	var grab := Vector3(1.18, 0.42, 0.18)
+	if feed_time < 1.65:
+		pincer.position = start
+	elif feed_time < 2.55:
+		pincer.position = start.lerp(grab, smoothstep(1.65, 2.55, feed_time))
+	elif feed_time < 4.25:
+		pincer.position = grab.lerp(Vector3(0.57, -0.05, 0.18), smoothstep(2.55, 4.25, feed_time))
+	else:
+		pincer.position = Vector3(0.57, -0.05, 0.18)
+	var close := 0.52
+	if feed_time >= 2.2 and feed_time < 4.25:
+		close = 0.12
+	for finger_index in pincer.get_child_count():
+		var finger := pincer.get_child(finger_index) as MeshInstance3D
+		var side := -1.0 if finger_index == 0 else 1.0
+		finger.position.y = side * (0.12 + close * 0.25)
+		finger.rotation.z = side * (0.12 + close * 0.72)
+	var bite_open := 0.0
+	if feed_time >= 4.25 and feed_time < 4.8:
+		bite_open = sin((feed_time - 4.25) / 0.55 * PI) * 0.62
+	upper_jaw.rotation.z = -bite_open
+	lower_jaw.rotation.z = bite_open
 
 func _bone_number(name: String) -> int:
 	var parts := name.split("_")

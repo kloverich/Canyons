@@ -109,7 +109,7 @@ func _process(delta: float) -> void:
 		leech.rotation.z = sin(elapsed * 0.72) * 0.025
 	if feed_target:
 		if eating:
-			feed_target.begin(Vector3(2.0, -0.2, 0.0), Vector3(0.52, -0.22, 0.0), Vector3.LEFT) if not feed_target.active else feed_target.tick(delta)
+			feed_target.begin(Vector3(2.0, -0.2, 0.0), Vector3(0.95, -0.05, 0.0), Vector3(0.52, -0.22, 0.0), Vector3.LEFT) if not feed_target.active else feed_target.tick(delta)
 		else:
 			feed_target.stop()
 

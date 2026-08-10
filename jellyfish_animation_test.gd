@@ -52,7 +52,7 @@ func _process(delta: float) -> void:
 		jelly.rotation.z = sin(elapsed * 1.3) * 0.055
 	if feed_target:
 		if animation_mode == "EAT":
-			feed_target.begin(Vector3(0.0, -2.4, 0.15), Vector3(0.0, -0.35, 0.0), Vector3.UP) if not feed_target.active else feed_target.tick(delta)
+			feed_target.begin(Vector3(0.0, -2.4, 0.15), Vector3(0.0, -1.05, 0.0), Vector3(0.0, -0.35, 0.0), Vector3.UP, "tear_apart") if not feed_target.active else feed_target.tick(delta)
 		else:
 			feed_target.stop()
 	if skeleton:

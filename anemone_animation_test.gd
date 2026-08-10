@@ -48,7 +48,7 @@ func _process(delta: float) -> void:
 		_animate_anemone()
 	if feed_target:
 		if animation_mode == "EAT":
-			feed_target.begin(Vector3(2.8, 0.15, 0.0), Vector3(0.0, 0.18, 0.0), Vector3.LEFT) if not feed_target.active else feed_target.tick(delta)
+			feed_target.begin(Vector3(2.8, 0.15, 0.0), Vector3(1.05, 0.58, 0.0), Vector3(0.0, 0.18, 0.0), Vector3.LEFT, "tear_apart") if not feed_target.active else feed_target.tick(delta)
 		else:
 			feed_target.stop()
 	_update_camera(delta)
