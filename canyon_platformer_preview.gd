@@ -11,17 +11,18 @@ const LEVEL_WIDTH := 48.0
 const LEVEL_HEIGHT := 27.0
 const LEVEL_CENTER_Y := 4.5
 const GRAVITY := 24.0
-const RUN_SPEED := 6.5
+const RUN_SPEED := 4.8
 const JUMP_SPEED := 10.5
 const CLIMB_SPEED := 3.25
+const CLIMB_MOUNT_SPEED := 2.2
 const BLOCK_WIDTH := 1.0
 const BLOCK_HEIGHT := 1.0
 const CANYON_FLOOR := -8.8
+const PLAY_PLANE_Z := -1.55
 
 # The imported GLB names its NLA strips numerically.  Keep the gameplay names
 # here so state code cannot accidentally assign a clip to the wrong action.
-const ANIM_WALK := &"NlaTrack_001"
-const ANIM_RUN := &"NlaTrack_002"
+const ANIM_RUN := &"gameplay/run"
 const ANIM_JUMP := &"NlaTrack_003"
 const ANIM_CLIMB := &"gameplay/climb"
 
@@ -38,7 +39,9 @@ var current_player_animation := ""
 var facing_direction := 1.0
 var is_climbing := false
 var active_climb_wall: Dictionary = {}
+var climb_elapsed := 0.0
 var creatures: Array[Dictionary] = []
+var periodic_leeches: Array[Node3D] = []
 var elapsed := 0.0
 var seed_label: Label
 var terrain_columns: Array[Dictionary] = []
@@ -63,36 +66,52 @@ func _physics_process(delta: float) -> void:
 	var direction := Input.get_axis("ui_left", "ui_right")
 	if Input.is_key_pressed(KEY_A): direction = -1.0
 	if Input.is_key_pressed(KEY_D): direction = 1.0
-	var climb_up := Input.is_action_pressed("ui_up") or Input.is_key_pressed(KEY_W)
+	var jump_requested := Input.is_action_just_pressed("ui_accept")
 	var detected_wall := _climb_wall_at_player(direction)
-	if not is_climbing and not detected_wall.is_empty() and (climb_up or absf(direction) > 0.05):
+	# Climbing begins only from a grounded approach. Passing near a column while
+	# jumping or falling can no longer pull the player onto it.
+	if not is_climbing and not jump_requested and player.is_on_floor() and not detected_wall.is_empty() and absf(direction) > 0.05:
 		is_climbing = true
+		climb_elapsed = 0.0
+		detected_wall["phase"] = "wall"
 		active_climb_wall = detected_wall
 	if is_climbing:
+		climb_elapsed += delta
 		var wall := active_climb_wall
-		# Hold the player against the rock and advance vertically.  This avoids
-		# the old ledge-pull motion and makes Up a continuous rock-climb input.
 		player.velocity = Vector3.ZERO
-		player.position.x = float(wall["x"])
-		# Tall cube faces are climbed continuously once the player reaches them.
-		player.position.y += CLIMB_SPEED * delta
-		if player.position.y >= float(wall["top"]):
-			player.position = wall["mount"]
-			player.velocity = Vector3.ZERO
-			is_climbing = false
-			active_climb_wall = {}
+		var mount: Vector3 = wall["mount"]
+		if String(wall["phase"]) == "wall":
+			# Ease into physical contact, then climb the complete wall height.
+			player.position.x = move_toward(player.position.x, float(wall["x"]), CLIMB_MOUNT_SPEED * delta)
+			# Pause slightly for each reach, then gain height during the grip/pull.
+			# There are two pull beats per authored 0.9-second animation cycle.
+			var cycle := fposmod(climb_elapsed, 0.90) / 0.90
+			var pull_wave := maxf(0.0, sin((cycle * 2.0 - 0.22) * TAU))
+			var pull_speed := CLIMB_SPEED * (0.22 + pull_wave * pull_wave * 3.1)
+			player.position.y = move_toward(player.position.y, float(wall["top"]), pull_speed * delta)
+			if is_equal_approx(player.position.y, float(wall["top"])):
+				wall["phase"] = "mount"
+				active_climb_wall = wall
+		else:
+			# Move over the lip instead of teleporting half a block to its center.
+			player.position.y = mount.y
+			player.position.x = move_toward(player.position.x, mount.x, CLIMB_MOUNT_SPEED * delta)
+			if is_equal_approx(player.position.x, mount.x):
+				player.velocity = Vector3.ZERO
+				is_climbing = false
+				active_climb_wall = {}
 	else:
 		player.velocity.x = move_toward(player.velocity.x, direction * RUN_SPEED, 28.0 * delta)
 		player.velocity.z = 0.0
 		if not player.is_on_floor():
 			player.velocity.y -= GRAVITY * delta
-		if Input.is_action_just_pressed("ui_accept") and player.is_on_floor():
+		if jump_requested and player.is_on_floor():
 			player.velocity.y = JUMP_SPEED
 		player.move_and_slide()
-	player.position.z = 1.1
-	player.position.x = clampf(player.position.x, -23.2, 23.2)
+	player.position.z = PLAY_PLANE_Z
+	_wrap_player_across_seam()
 	if player.position.y < -12.0:
-		player.position = Vector3(-21.0, _surface_y_at(-21.0) + 0.9, 1.1)
+		player.position = Vector3(-21.0, _surface_y_at(-21.0) + 0.9, PLAY_PLANE_Z)
 		player.velocity = Vector3.ZERO
 	if player_model and absf(direction) > 0.01:
 		facing_direction = direction
@@ -101,6 +120,25 @@ func _physics_process(delta: float) -> void:
 		var facing_angle := PI * 0.5 if direction > 0.0 else -PI * 0.5
 		player_model.rotation.y = lerp_angle(player_model.rotation.y, facing_angle, 1.0 - exp(-delta * 18.0))
 	_update_player_animation(direction)
+
+func _wrap_player_across_seam() -> void:
+	var canonical_x := _canonical_world_x(player.position.x)
+	var wrap_offset := canonical_x - player.position.x
+	if is_zero_approx(wrap_offset):
+		return
+	player.position.x = canonical_x
+	# Shift the already-smoothed camera state by the same circumference. The
+	# rendered terrain repeats there, so neither framing nor motion visibly cuts.
+	camera.position.x += wrap_offset
+	camera_focus.x += wrap_offset
+
+func _canonical_world_x(x: float) -> float:
+	return fposmod(x + LEVEL_WIDTH * 0.5, LEVEL_WIDTH) - LEVEL_WIDTH * 0.5
+
+func _periodic_x_near_reference(x: float, reference_x: float) -> float:
+	var canonical_x := _canonical_world_x(x)
+	var copy_number: float = round((reference_x - canonical_x) / LEVEL_WIDTH)
+	return canonical_x + copy_number * LEVEL_WIDTH
 
 func _climb_wall_at_player(input_direction: float) -> Dictionary:
 	if terrain_columns.size() < 2 or absf(input_direction) < 0.05:
@@ -126,7 +164,7 @@ func _climb_wall_at_player(input_direction: float) -> Dictionary:
 		# The actor's center must climb to the same standing height as the mount,
 		# otherwise a one-block face appears as a teleport for the final 0.9m.
 		"top": next_surface + 0.9,
-		"mount": Vector3(-23.5 + next_index * BLOCK_WIDTH, next_surface + 0.9, 1.1),
+		"mount": Vector3(-23.5 + next_index * BLOCK_WIDTH, next_surface + 0.9, PLAY_PLANE_Z),
 	}
 	return {}
 
@@ -134,6 +172,7 @@ func _process(delta: float) -> void:
 	elapsed += delta
 	_update_procedural_climb_pose(delta)
 	_animate_creatures(delta)
+	_update_periodic_leeches()
 	_update_follow_camera(delta)
 
 func _unhandled_input(event: InputEvent) -> void:
@@ -182,32 +221,41 @@ func _build_world() -> void:
 	add_child(rim)
 
 func _build_collision_map() -> void:
-	# A low-frequency random walk produces a readable Mario-like histogram:
-	# solid block columns, stepped slopes, and deep canyon bowls.
+	# Randomized circular harmonics produce a histogram whose final sample joins
+	# its first. Three rendered copies hide the coordinate wrap at either seam.
 	var terrain_root := Node3D.new()
-	terrain_root.name = "RandomBlockCanyon"
+	terrain_root.name = "PeriodicBlockPlanet"
 	add_child(terrain_root)
 	var terrain_rng := RandomNumberGenerator.new()
 	terrain_rng.seed = landscape_seed * 13 + 91
-	var surface := -2.8
+	var phase_a := terrain_rng.randf_range(0.0, TAU)
+	var phase_b := terrain_rng.randf_range(0.0, TAU)
+	var phase_c := terrain_rng.randf_range(0.0, TAU)
+	var heights: Array[float] = []
 	for column in range(48):
-		if column > 0:
-			surface += terrain_rng.randf_range(-2.15, 2.15)
-			if column % 7 == 0:
-				surface -= terrain_rng.randf_range(2.8, 4.8)
-			# Align every surface to a whole cube, including the collision top.
-			surface = CANYON_FLOOR + snappedf(clampf(surface, -7.8, 10.2) - CANYON_FLOOR, BLOCK_HEIGHT)
+		var angle := TAU * float(column) / 48.0
+		var canyon_cut := pow(maxf(0.0, sin(angle * 3.0 + phase_c)), 3.0) * 4.6
+		var surface := -0.8 + sin(angle + phase_a) * 3.4 + sin(angle * 2.0 + phase_b) * 2.2 + sin(angle * 5.0 + phase_c) * 1.15 - canyon_cut
+		surface = CANYON_FLOOR + snappedf(clampf(surface, -7.8, 9.2) - CANYON_FLOOR, BLOCK_HEIGHT)
+		heights.append(surface)
+	# Exact equality makes the two columns straddling the wrap indistinguishable.
+	heights[heights.size() - 1] = heights[0]
+	for column in range(48):
 		var x := -23.5 + column * BLOCK_WIDTH
+		var surface := heights[column]
 		terrain_columns.append({"x": x, "surface": surface})
-		_add_canyon_column(terrain_root, column, x, surface, terrain_rng)
+		for repeat_offset in [-LEVEL_WIDTH, 0.0, LEVEL_WIDTH]:
+			var copy_rng := RandomNumberGenerator.new()
+			copy_rng.seed = landscape_seed * 4099 + column * 131
+			_add_canyon_column(terrain_root, column, x + repeat_offset, surface, copy_rng)
 
 func _add_canyon_column(parent: Node3D, column: int, x: float, surface: float, terrain_rng: RandomNumberGenerator) -> void:
 	var collision_body := StaticBody3D.new()
 	collision_body.name = "CanyonColumn_%d" % column
-	collision_body.position = Vector3(x, (CANYON_FLOOR + surface) * 0.5, 1.0)
+	collision_body.position = Vector3(x, (CANYON_FLOOR + surface) * 0.5, PLAY_PLANE_Z)
 	var collision := CollisionShape3D.new()
 	var collision_shape := BoxShape3D.new()
-	collision_shape.size = Vector3(BLOCK_WIDTH, surface - CANYON_FLOOR, 4.0)
+	collision_shape.size = Vector3(BLOCK_WIDTH, surface - CANYON_FLOOR, BLOCK_WIDTH * 3.0)
 	collision.shape = collision_shape
 	collision_body.add_child(collision)
 	parent.add_child(collision_body)
@@ -254,7 +302,7 @@ func _add_wall(node_name: String, position: Vector3, size: Vector3) -> void:
 func _build_player() -> void:
 	player = CharacterBody3D.new()
 	player.name = "ControllableTacticalSuit"
-	player.position = Vector3(-21.0, _surface_y_at(-21.0) + 0.9, 1.1)
+	player.position = Vector3(-21.0, _surface_y_at(-21.0) + 0.9, PLAY_PLANE_Z)
 	player.floor_snap_length = 0.22
 	player.floor_max_angle = deg_to_rad(50.0)
 	var collision := CollisionShape3D.new()
@@ -280,50 +328,75 @@ func _build_player() -> void:
 			player_rest_rotations[bone_index] = player_skeleton.get_bone_pose_rotation(bone_index)
 			player_bones[player_skeleton.get_bone_name(bone_index)] = bone_index
 	if player_animator:
-		_set_animation_loop(ANIM_WALK, true)
-		_set_animation_loop(ANIM_RUN, true)
-		_remove_animation_root_motion(ANIM_WALK)
-		_remove_animation_root_motion(ANIM_RUN)
 		_remove_animation_root_motion(ANIM_JUMP)
-		_build_climb_animation()
+		_build_gameplay_animations()
 
-func _build_climb_animation() -> void:
+func _build_gameplay_animations() -> void:
 	if not player_animator or not player_skeleton:
 		return
 	var animation_root := player_animator.get_node(player_animator.root_node)
 	var skeleton_path := animation_root.get_path_to(player_skeleton)
+	var run := Animation.new()
+	run.resource_name = "ProceduralRun"
+	run.length = 0.72
+	run.loop_mode = Animation.LOOP_LINEAR
+	# Lower both arms from the bind pose, then counter-swing them with the legs.
+	# The rig faces sideways in gameplay, so local-X limb swings become visible
+	# forward/back strides in the screen plane.
+	_add_gameplay_rotation_track(run, skeleton_path, "L_Upperarm", Vector3.FORWARD, 1.36, Vector3.RIGHT, -0.34, 0.34)
+	_add_gameplay_rotation_track(run, skeleton_path, "R_Upperarm", Vector3.FORWARD, -1.36, Vector3.RIGHT, 0.34, -0.34)
+	_add_gameplay_rotation_track(run, skeleton_path, "L_Forearm", Vector3.RIGHT, -0.28, Vector3.FORWARD, -0.12, 0.18)
+	_add_gameplay_rotation_track(run, skeleton_path, "R_Forearm", Vector3.RIGHT, 0.28, Vector3.FORWARD, 0.12, -0.18)
+	_add_gameplay_rotation_track(run, skeleton_path, "L_Thigh", Vector3.RIGHT, 0.0, Vector3.RIGHT, 0.52, -0.52)
+	_add_gameplay_rotation_track(run, skeleton_path, "R_Thigh", Vector3.RIGHT, 0.0, Vector3.RIGHT, -0.52, 0.52)
+	_add_gameplay_rotation_track(run, skeleton_path, "L_Calf", Vector3.RIGHT, -0.24, Vector3.RIGHT, -0.62, 0.08)
+	_add_gameplay_rotation_track(run, skeleton_path, "R_Calf", Vector3.RIGHT, -0.24, Vector3.RIGHT, 0.08, -0.62)
+	_add_gameplay_rotation_track(run, skeleton_path, "Spine01", Vector3.UP, 0.0, Vector3.UP, -0.08, 0.08)
 	var climb := Animation.new()
 	climb.resource_name = "ProceduralRockClimb"
 	climb.length = 0.90
 	climb.loop_mode = Animation.LOOP_LINEAR
-	# One side reaches while the opposite knee rises; the second half swaps the
-	# planted hand and foot. These are authored runtime tracks, not an imported
-	# pull-up clip or frame-dependent manual skeleton overrides.
-	_add_climb_rotation_track(climb, skeleton_path, "L_Upperarm", Vector3.FORWARD, -1.57, -0.42)
-	_add_climb_rotation_track(climb, skeleton_path, "R_Upperarm", Vector3.FORWARD, 0.42, 1.57)
-	_add_climb_rotation_track(climb, skeleton_path, "L_Forearm", Vector3.RIGHT, -0.82, -0.24)
-	_add_climb_rotation_track(climb, skeleton_path, "R_Forearm", Vector3.RIGHT, 0.24, 0.82)
-	_add_climb_rotation_track(climb, skeleton_path, "L_Thigh", Vector3.UP, 0.58, -0.08)
-	_add_climb_rotation_track(climb, skeleton_path, "R_Thigh", Vector3.UP, 0.08, -0.58)
-	_add_climb_rotation_track(climb, skeleton_path, "L_Calf", Vector3.RIGHT, -1.18, -0.22)
-	_add_climb_rotation_track(climb, skeleton_path, "R_Calf", Vector3.RIGHT, -0.22, -1.18)
-	_add_climb_rotation_track(climb, skeleton_path, "Spine01", Vector3.RIGHT, -0.11, 0.11)
+	# Five staged poses per cycle: left reach, left pull/step, transfer, right
+	# reach, right pull/step. The large rig-specific angles move hands from the
+	# character's side to clearly above the helmet instead of hovering near T-pose.
+	_add_climb_keyed_track(climb, skeleton_path, "L_Upperarm", Vector3.FORWARD, [0.72, -1.68, -1.28, 0.58, 0.72])
+	_add_climb_keyed_track(climb, skeleton_path, "R_Upperarm", Vector3.FORWARD, [1.28, -0.58, -0.72, 1.68, 1.28])
+	_add_climb_keyed_track(climb, skeleton_path, "L_Forearm", Vector3.RIGHT, [-0.18, -0.32, -1.24, -0.42, -0.18])
+	_add_climb_keyed_track(climb, skeleton_path, "R_Forearm", Vector3.RIGHT, [1.24, 0.42, 0.18, 0.32, 1.24])
+	_add_climb_keyed_track(climb, skeleton_path, "L_Thigh", Vector3.UP, [-0.30, 0.72, 0.48, -0.22, -0.30])
+	_add_climb_keyed_track(climb, skeleton_path, "R_Thigh", Vector3.UP, [-0.48, 0.22, 0.30, -0.72, -0.48])
+	_add_climb_keyed_track(climb, skeleton_path, "L_Calf", Vector3.RIGHT, [-0.18, -1.48, -0.82, -0.24, -0.18])
+	_add_climb_keyed_track(climb, skeleton_path, "R_Calf", Vector3.RIGHT, [-0.82, -0.24, -0.18, -1.48, -0.82])
+	_add_climb_keyed_track(climb, skeleton_path, "Spine01", Vector3.RIGHT, [-0.14, -0.22, 0.0, 0.22, -0.14])
 	var library := AnimationLibrary.new()
+	library.add_animation("run", run)
 	library.add_animation("climb", climb)
 	if player_animator.has_animation_library("gameplay"):
 		player_animator.remove_animation_library("gameplay")
 	player_animator.add_animation_library("gameplay", library)
 
-func _add_climb_rotation_track(animation: Animation, skeleton_path: NodePath, bone_name: String, axis: Vector3, first_angle: float, second_angle: float) -> void:
+func _add_gameplay_rotation_track(animation: Animation, skeleton_path: NodePath, bone_name: String, base_axis: Vector3, base_angle: float, motion_axis: Vector3, first_motion: float, second_motion: float) -> void:
+	if not player_bones.has(bone_name):
+		return
+	var bone_index: int = player_bones[bone_name]
+	var rest: Quaternion = player_rest_rotations[bone_index]
+	var base_rotation := Quaternion(base_axis, base_angle)
+	var track := animation.add_track(Animation.TYPE_ROTATION_3D)
+	animation.track_set_path(track, NodePath("%s:%s" % [skeleton_path, bone_name]))
+	animation.rotation_track_insert_key(track, 0.0, rest * base_rotation * Quaternion(motion_axis, first_motion))
+	animation.rotation_track_insert_key(track, animation.length * 0.5, rest * base_rotation * Quaternion(motion_axis, second_motion))
+	animation.rotation_track_insert_key(track, animation.length, rest * base_rotation * Quaternion(motion_axis, first_motion))
+
+func _add_climb_keyed_track(animation: Animation, skeleton_path: NodePath, bone_name: String, axis: Vector3, angles: Array) -> void:
 	if not player_bones.has(bone_name):
 		return
 	var bone_index: int = player_bones[bone_name]
 	var rest: Quaternion = player_rest_rotations[bone_index]
 	var track := animation.add_track(Animation.TYPE_ROTATION_3D)
 	animation.track_set_path(track, NodePath("%s:%s" % [skeleton_path, bone_name]))
-	animation.rotation_track_insert_key(track, 0.0, rest * Quaternion(axis, first_angle))
-	animation.rotation_track_insert_key(track, 0.45, rest * Quaternion(axis, second_angle))
-	animation.rotation_track_insert_key(track, 0.90, rest * Quaternion(axis, first_angle))
+	var key_times := [0.0, 0.18, 0.40, 0.63, 0.90]
+	for key_index in key_times.size():
+		animation.rotation_track_insert_key(track, key_times[key_index], rest * Quaternion(axis, float(angles[key_index])))
 
 func _find_animation_player(node: Node) -> AnimationPlayer:
 	if node is AnimationPlayer:
@@ -372,10 +445,7 @@ func _update_player_animation(direction: float) -> void:
 			_play_player_animation(ANIM_JUMP, 0.14, 0.35)
 	elif absf(direction) > 0.05 or absf(player.velocity.x) > 0.5:
 		var speed_ratio := absf(player.velocity.x) / RUN_SPEED
-		if speed_ratio < 0.62:
-			_play_player_animation(ANIM_WALK, 0.12, clampf(speed_ratio * 1.45, 0.65, 1.0))
-		else:
-			_play_player_animation(ANIM_RUN, 0.12, clampf(speed_ratio, 0.85, 1.25))
+		_play_player_animation(ANIM_RUN, 0.12, clampf(speed_ratio, 0.72, 1.15))
 	else:
 		# This model has no idle strip.  Leave it in its neutral rest pose rather
 		# than playing NlaTrack, which is its imported climbing/pull-up motion.
@@ -394,9 +464,9 @@ func _update_procedural_climb_pose(delta: float) -> void:
 		return
 	# The AnimationPlayer owns the limb tracks; this adds only a small whole-body
 	# weight transfer so each planted-hand step visibly lifts the climber.
-	var phase := elapsed * 6.2
+	var phase := climb_elapsed / 0.90 * TAU
 	var planted_bob := absf(sin(phase))
-	player_model.position.y = -0.88 + planted_bob * 0.08
+	player_model.position.y = -0.88 + planted_bob * 0.15
 
 func _update_follow_camera(delta: float) -> void:
 	if not camera or not player:
@@ -405,16 +475,12 @@ func _update_follow_camera(delta: float) -> void:
 		camera_focus = player.position + Vector3(0.0, 0.8, 0.0)
 		camera_focus_initialized = true
 	var viewport_size := get_viewport().get_visible_rect().size
-	var aspect := viewport_size.x / maxf(viewport_size.y, 1.0)
-	var half_width := camera.size * aspect * 0.5
 	var half_height := camera.size * 0.5
 	var desired_look_ahead := player.velocity.x / RUN_SPEED * minf(2.1, camera.size * 0.15)
 	camera_look_ahead = lerpf(camera_look_ahead, desired_look_ahead, 1.0 - exp(-delta * 3.0))
-	var min_x := -LEVEL_WIDTH * 0.5 + half_width
-	var max_x := LEVEL_WIDTH * 0.5 - half_width
 	var min_y := LEVEL_CENTER_Y - LEVEL_HEIGHT * 0.5 + half_height
 	var max_y := LEVEL_CENTER_Y + LEVEL_HEIGHT * 0.5 - half_height
-	var desired_x := clampf(player.position.x + camera_look_ahead, min_x, max_x) if min_x <= max_x else 0.0
+	var desired_x := player.position.x + camera_look_ahead
 	var desired_y := clampf(player.position.y + 0.8, min_y, max_y) if min_y <= max_y else LEVEL_CENTER_Y
 	camera_focus.x = lerpf(camera_focus.x, desired_x, 1.0 - exp(-delta * 4.0))
 	# A vertical dead zone prevents every stair-step and animation bob from
@@ -428,14 +494,14 @@ func _update_follow_camera(delta: float) -> void:
 	camera.look_at(Vector3(camera_focus.x, camera_focus.y, 0.0), Vector3.UP)
 
 func _place_creatures() -> void:
-	_add_rigged_creature("CRAB", CRAB_SCENE, Vector3(-8.0, _surface_y_at(-8.0) + 0.08, 0.7), Vector3.ONE * 2.25)
-	_add_rigged_creature("CRAB", CRAB_SCENE, Vector3(16.0, _surface_y_at(16.0) + 0.08, 0.7), Vector3.ONE * 1.85)
-	_add_rigged_creature("ANEMONE", ANEMONE_SCENE, Vector3(-1.0, _surface_y_at(-1.0) + 0.03, 0.65), Vector3.ONE * 2.25)
-	_add_rigged_creature("ANEMONE", ANEMONE_SCENE, Vector3(19.0, _surface_y_at(19.0) + 0.03, 0.65), Vector3.ONE * 1.9)
-	_add_rigged_creature("JELLY", JELLY_SCENE, Vector3(4.0, _surface_y_at(4.0) + 3.1, 0.45), Vector3.ONE * 2.0)
-	_add_rigged_creature("JELLY", JELLY_SCENE, Vector3(11.0, _surface_y_at(11.0) + 2.7, 0.45), Vector3.ONE * 1.7)
-	_add_leech(Vector3(-13.0, _surface_y_at(-13.0) + 0.08, 0.75), Vector3.UP, Vector3.RIGHT)
-	_add_leech(Vector3(22.0, _surface_y_at(22.0) + 0.08, 0.75), Vector3.UP, Vector3.LEFT)
+	_add_rigged_creature("CRAB", CRAB_SCENE, Vector3(-8.0, _surface_y_at(-8.0) + 0.08, PLAY_PLANE_Z), Vector3.ONE * 2.25)
+	_add_rigged_creature("CRAB", CRAB_SCENE, Vector3(16.0, _surface_y_at(16.0) + 0.08, PLAY_PLANE_Z), Vector3.ONE * 1.85)
+	_add_rigged_creature("ANEMONE", ANEMONE_SCENE, Vector3(-1.0, _surface_y_at(-1.0) + 0.03, PLAY_PLANE_Z), Vector3.ONE * 2.25)
+	_add_rigged_creature("ANEMONE", ANEMONE_SCENE, Vector3(19.0, _surface_y_at(19.0) + 0.03, PLAY_PLANE_Z), Vector3.ONE * 1.9)
+	_add_rigged_creature("JELLY", JELLY_SCENE, Vector3(4.0, _surface_y_at(4.0) + 3.1, PLAY_PLANE_Z), Vector3.ONE * 2.0)
+	_add_rigged_creature("JELLY", JELLY_SCENE, Vector3(11.0, _surface_y_at(11.0) + 2.7, PLAY_PLANE_Z), Vector3.ONE * 1.7)
+	_add_leech(Vector3(-13.0, _surface_y_at(-13.0) + 0.08, PLAY_PLANE_Z), Vector3.UP, Vector3.RIGHT)
+	_add_leech(Vector3(22.0, _surface_y_at(22.0) + 0.08, PLAY_PLANE_Z), Vector3.UP, Vector3.LEFT)
 
 func _add_rigged_creature(kind: String, scene: PackedScene, position: Vector3, scale_value: Vector3) -> Node3D:
 	var creature := scene.instantiate()
@@ -496,6 +562,9 @@ func _animate_creatures(delta: float) -> void:
 			root.rotation.z = sin(swim_time * 1.18) * 0.12
 			var bell_pulse := 1.0 + sin(swim_time * 3.4) * 0.14
 			root.scale = Vector3(base_scale.x / sqrt(bell_pulse), base_scale.y * bell_pulse, base_scale.z / sqrt(bell_pulse))
+			root.position.x = _periodic_x_near_reference(root.position.x, player.position.x)
+		elif kind != "CRAB":
+			root.position.x = _periodic_x_near_reference(base.x, player.position.x)
 		if not skeleton:
 			continue
 		var rests: Dictionary = entry["rotations"]
@@ -509,6 +578,9 @@ func _animate_creatures(delta: float) -> void:
 			skeleton.set_bone_pose_rotation(bone_index, rest * Quaternion(Vector3.FORWARD, sin(elapsed * 2.1 + offset) * amount) * Quaternion(Vector3.RIGHT, cos(elapsed * 1.7 + offset) * amount * 0.55))
 
 func _animate_crab_patrol(entry: Dictionary, crab: Node3D, base: Vector3, delta: float) -> void:
+	# Patrol state is stored in canonical planet coordinates. The visible root is
+	# remapped to the copy nearest the player only after movement is calculated.
+	crab.position.x = _canonical_world_x(crab.position.x)
 	var column: int = entry["crab_column"]
 	var direction: int = entry["crab_direction"]
 	var state: String = entry["crab_state"]
@@ -559,6 +631,7 @@ func _animate_crab_patrol(entry: Dictionary, crab: Node3D, base: Vector3, delta:
 	var wall_rotation := Quaternion(Vector3.FORWARD, target_roll)
 	var target_orientation := wall_rotation * profile_rotation
 	crab.quaternion = crab.quaternion.slerp(target_orientation, turn_weight)
+	crab.position.x = _periodic_x_near_reference(crab.position.x, player.position.x)
 
 func _column_center_x(column: int) -> float:
 	return -23.5 + column * BLOCK_WIDTH
@@ -579,6 +652,12 @@ func _add_leech(position: Vector3, normal: Vector3, direction: Vector3, min_y :=
 	leech.set("wall_min_y", min_y)
 	leech.set("wall_max_y", max_y)
 	add_child(leech)
+	periodic_leeches.append(leech)
+
+func _update_periodic_leeches() -> void:
+	for leech in periodic_leeches:
+		if is_instance_valid(leech):
+			leech.position.x = _periodic_x_near_reference(leech.position.x, player.position.x)
 
 func _build_interface() -> void:
 	var layer := CanvasLayer.new()
@@ -595,7 +674,7 @@ func _build_interface() -> void:
 	title.add_theme_color_override("font_color", Color("#ffd0a0"))
 	layer.add_child(title)
 	seed_label = Label.new()
-	seed_label.text = "A/D or arrows: run   Space: jump   Up/W on a climb wall: climb   wheel: zoom   R: restart   Esc: tests"
+	seed_label.text = "A/D or arrows: run   Space: jump   Run into a wall: climb   wheel: zoom   R: restart   Esc: tests"
 	seed_label.position = Vector2(35, 54)
 	seed_label.add_theme_font_size_override("font_size", 14)
 	seed_label.add_theme_color_override("font_color", Color("#bfeaff"))
